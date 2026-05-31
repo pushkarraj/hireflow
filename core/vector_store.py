@@ -108,6 +108,18 @@ class VectorStore:
     def is_ready(self) -> bool:
         """Check if all components are initialized and ready for use"""
         return self._ready
+
+    def clear_index(self) -> bool:
+        """Delete all vectors from the index for a clean reupload"""
+        if not self._ready or not self.index:
+            return False
+        try:
+            self.index.delete(delete_all=True)
+            logger.info("Pinecone index cleared")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear index: {e}")
+            return False
     
     def add_resumes(self, documents: List[Any]) -> bool:
         """Convert resume documents to embeddings and store in Pinecone"""

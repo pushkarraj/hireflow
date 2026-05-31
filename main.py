@@ -112,9 +112,12 @@ class HireFlowDemo:
             self.components['hybrid_indexer'] = HybridIndexer()
             print("   OK: Hybrid Indexer ready")
             
-            # Initialize search router
+            # Initialize search router with shared components so it sees indexed data
             print("   Initializing Search Router...")
-            self.components['search_router'] = SearchRouter()
+            self.components['search_router'] = SearchRouter(
+                vector_store=self.components['vector_store'],
+                hybrid_indexer=self.components['hybrid_indexer'],
+            )
             print("   OK: Search Router ready")
             
             # Initialize AI components
@@ -126,7 +129,7 @@ class HireFlowDemo:
             
             # Initialize evaluation and memory
             print("   Initializing Evaluation & Memory...")
-            self.components['evaluator'] = RAGEvaluator()
+            self.components['evaluator'] = RAGEvaluator(search_router=self.components['search_router'])
             self.components['memory'] = MemoryRAG()
             print("   OK: Evaluation & Memory ready")
             
@@ -152,7 +155,11 @@ class HireFlowDemo:
             jds = load_job_descriptions(self.jd_dir)
             print(f"   OK: Loaded {len(jds)} job descriptions")
             
-            # Index in hybrid indexer
+            # Index in hybrid indexer (which internally uploads to Pinecone)
+            print("   Clearing Pinecone index for fresh upload...")
+            self.components['vector_store'].clear_index()
+            print("   OK: Index cleared")
+
             print("   Indexing resumes in hybrid search...")
             if not self.components['hybrid_indexer'].index_resumes(resumes):
                 print("ERROR: Resume indexing failed")
@@ -164,12 +171,6 @@ class HireFlowDemo:
                 print("ERROR: Job description indexing failed")
                 return False
             print("   OK: Job descriptions indexed")
-            
-            # Also index in vector store for direct vector search
-            print("   Adding to vector store...")
-            self.components['vector_store'].add_resumes(resumes)
-            self.components['vector_store'].add_job_descriptions(jds)
-            print("   OK: Documents added to vector store")
             
             return True
             
@@ -349,10 +350,11 @@ class HireFlowDemo:
         """Display search results in a formatted way"""
         for i, result in enumerate(results[:max_show], 1):
             metadata = result.get('metadata', {})
-            name = metadata.get('name', f'Candidate {i}')
+            # deep search stores name/skills/experience at top level; vector search in metadata
+            name = metadata.get('name') or result.get('name', f'Candidate {i}')
             score = result.get('score', result.get('combined_score', 0))
-            skills = metadata.get('skills', [])
-            experience = metadata.get('experience', 'N/A')
+            skills = metadata.get('skills') or result.get('skills', [])
+            experience = metadata.get('experience') or result.get('experience', 'N/A')
             
             print(f"   {i}. {name}")
             print(f"      Score: {score:.3f} | Experience: {experience} | Skills: {', '.join(skills[:3])}")

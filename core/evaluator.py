@@ -6,12 +6,8 @@ Evaluates retrieval and answer generation performance using standard metrics.
 from typing import Dict, Any, List, Optional
 import pandas as pd
 from dataclasses import dataclass
-from core.search_router import SearchRouter
 from utils.utils import get_logger
-from ragas import evaluate
-from ragas.metrics import (
-    answer_relevancy, context_precision, faithfulness, answer_correctness
-)
+from utils.config import GOOGLE_API_KEY, LLM_MODEL
 
 logger = get_logger(__name__)
 
@@ -37,21 +33,51 @@ class RAGEvaluationMetrics:
 class RAGEvaluator:
     """RAGAS-powered search quality evaluator with history tracking"""
     
-    def __init__(self):
-        """Initialize RAGAS metrics and evaluation tracking"""
+    def __init__(self, search_router=None):
+        """Initialize RAGAS metrics and evaluation tracking.
+
+        Args:
+            search_router: Optional shared SearchRouter instance so evaluation
+                           runs against the already-indexed documents.
+        """
+        from ragas.metrics import (
+            answer_relevancy, context_precision, faithfulness, answer_correctness
+        )
         self.ragas_metrics = [
             answer_relevancy, context_precision, faithfulness, answer_correctness
         ]
-        self.evaluation_history = []  # Track all evaluations
+        self.evaluation_history = []
+        self._search_router = search_router  # shared, may be set later
+
+        # Build ragas-compatible LLM and embeddings wrappers
+        self._ragas_llm = None
+        self._ragas_embeddings = None
+        if GOOGLE_API_KEY:
+            try:
+                from ragas.llms import LangchainLLMWrapper
+                from ragas.embeddings import LangchainEmbeddingsWrapper
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                from utils.utils import get_embeddings
+                self._ragas_llm = LangchainLLMWrapper(
+                    ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=GOOGLE_API_KEY, temperature=0.1)
+                )
+                self._ragas_embeddings = LangchainEmbeddingsWrapper(get_embeddings())
+            except Exception as e:
+                logger.warning(f"RAGEvaluator: could not build ragas LLM/embeddings wrappers: {e}")
     
     def evaluate_search_quality(self, query: str, expected_skills: List[str], 
                               search_mode: str = "deep", top_k: int = 5) -> RAGEvaluationMetrics:
         """Run search and evaluate results using RAGAS quality metrics"""
         
         try:
-            # Create search router instance
-            search_router = SearchRouter()
-            search_result = search_router.search(query, top_k, search_mode=search_mode)
+            # Use the shared router so indexed documents are visible
+            if self._search_router is not None:
+                router = self._search_router
+            else:
+                from core.search_router import SearchRouter
+                router = SearchRouter()
+
+            search_result = router.search(query, top_k, search_mode=search_mode)
             
             if not search_result.get('results'):
                 return self.create_default_metrics()
@@ -76,9 +102,15 @@ class RAGEvaluator:
     def evaluate_with_ragas(self, query: str, candidates: List[Dict], 
                             expected_skills: List[str]) -> RAGEvaluationMetrics:
         """Run RAGAS evaluation on search results and calculate final metrics"""
-        
+        from ragas import evaluate
+
         evaluation_data = self.prepare_ragas_data(query, candidates, expected_skills)
-        results = evaluate(evaluation_data, metrics=self.ragas_metrics)
+        results = evaluate(
+            evaluation_data,
+            metrics=self.ragas_metrics,
+            llm=self._ragas_llm,
+            embeddings=self._ragas_embeddings,
+        )
         
         metrics = RAGEvaluationMetrics(
             answer_relevancy=float(results['answer_relevancy']),
@@ -93,37 +125,39 @@ class RAGEvaluator:
         
         return metrics
     
-    def prepare_ragas_data(self, query: str, candidates: List[Dict], 
-                           expected_skills: List[str]) -> pd.DataFrame:
-        """Convert search results to RAGAS-compatible DataFrame format"""
-        
-        data = []
+    def prepare_ragas_data(self, query: str, candidates: List[Dict],
+                           expected_skills: List[str]):
+        """Convert search results to RAGAS 0.2+ EvaluationDataset format"""
+        from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+
+        samples = []
         for candidate in candidates:
             metadata = candidate.get('metadata', {})
             
-            # Create context from candidate metadata
+            # Build context string from candidate info
             context_parts = []
-            if 'name' in metadata:
-                context_parts.append(f"Name: {metadata['name']}")
-            if 'skills' in metadata:
-                context_parts.append(f"Skills: {', '.join(metadata['skills'][:5])}")
-            if 'experience' in metadata:
-                context_parts.append(f"Experience: {metadata['experience']} years")
-            
+            name = metadata.get('name') or candidate.get('name', '')
+            skills = metadata.get('skills') or candidate.get('skills', [])
+            experience = metadata.get('experience') or candidate.get('experience')
+            if name:
+                context_parts.append(f"Name: {name}")
+            if skills:
+                context_parts.append(f"Skills: {', '.join(skills[:5])}")
+            if experience is not None:
+                context_parts.append(f"Experience: {experience} years")
             context = " | ".join(context_parts) if context_parts else "No metadata"
             
-            # Create ground truth and generated answer
-            ground_truth = self.create_ground_truth(metadata.get('skills', []), expected_skills)
-            generated_answer = f"{metadata.get('name', 'Candidate')} with skills in {', '.join(metadata.get('skills', [])[:3])}"
+            ground_truth = self.create_ground_truth(skills, expected_skills)
+            generated_answer = f"{name or 'Candidate'} with skills in {', '.join(skills[:3])}"
             
-            data.append({
-                'question': query,
-                'contexts': [context],
-                'ground_truth': ground_truth,
-                'answer': generated_answer
-            })
+            samples.append(SingleTurnSample(
+                user_input=query,
+                retrieved_contexts=[context],
+                reference=ground_truth,
+                response=generated_answer,
+            ))
         
-        return pd.DataFrame(data)
+        return EvaluationDataset(samples=samples)
     
     def create_ground_truth(self, candidate_skills: List[str], expected_skills: List[str]) -> str:
         """Generate ground truth labels based on skill matching percentage"""

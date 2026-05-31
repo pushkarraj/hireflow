@@ -17,9 +17,10 @@ logger = get_logger(__name__)
 class SearchRouter:
     """Routes search queries to appropriate search strategy (shallow vs deep)"""
     
-    def __init__(self):
-        self.hybrid_indexer = HybridIndexer()
-        self.vector_store = VectorStore()
+    def __init__(self, vector_store: VectorStore = None, hybrid_indexer: HybridIndexer = None):
+        # Reuse shared instances when provided so indexed documents are visible
+        self.vector_store = vector_store if vector_store is not None else VectorStore()
+        self.hybrid_indexer = hybrid_indexer if hybrid_indexer is not None else HybridIndexer()
         
         self.llm = None
         if GOOGLE_API_KEY:
@@ -98,7 +99,11 @@ class SearchRouter:
                     formatted_results.append({
                         'candidate_id': result.get('candidate_id', 'unknown'),
                         'name': result.get('name', 'Unknown'),
-                        'score': result.get('combined_rrf_score', result.get('rrf_score', 0.0)),
+                        # hybrid_indexer uses 'combined_score'; fall back to legacy names
+                        'score': result.get('combined_score', result.get('combined_rrf_score', result.get('rrf_score', 0.0))),
+                        'page_content': result.get('text', result.get('page_content', '')),
+                        'skills': result.get('skills', []),
+                        'experience': result.get('experience'),
                         'metadata': result.get('metadata', {}),
                         'search_type': 'deep_hybrid_reranked',
                         'source_query': query,
