@@ -30,7 +30,7 @@ from core.evaluator import RAGEvaluator
 from core.memory_rag import MemoryRAG
 from utils.config import GOOGLE_API_KEY, PINECONE_API_KEY
 from utils.utils import get_logger, load_pdf
-from utils.schemas import JobDescription
+from utils.schemas import JobDescription, Resume
 
 logger = get_logger(__name__)
 
@@ -253,9 +253,16 @@ class HireFlowDemo:
             parsed_jd = self.components['job_parser'].parse_job_description(sample_jd_text, "demo_jd")
             jd_obj = JobDescription(**parsed_jd)
             
-            # AI evaluation
-            evaluation = self.components['reranker'].evaluate_candidate_fit(
-                candidate, jd_obj.model_dump()
+            # AI evaluation — build Resume object from the candidate dict
+            resume_obj = Resume(
+                candidate_id=candidate.get('candidate_id', 'unknown'),
+                name=candidate.get('name', 'Unknown'),
+                text=candidate.get('page_content', candidate.get('text', '')),
+                skills=candidate.get('skills', []),
+                experience=candidate.get('experience'),
+            )
+            evaluation = self.components['reranker'].evaluate_candidate(
+                resume_obj, jd_obj
             )
             
             print("\nAI Evaluation Results:")
